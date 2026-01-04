@@ -1,0 +1,204 @@
+﻿@page "/"
+@using NodaTime
+@using TimezoneComparator.Services
+@inject ITimezoneService TimezoneService
+@inject IJSRuntime JSRuntime
+
+<PageTitle>Timezone Comparator</PageTitle>
+
+<div class="container py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1>🌍 Timezone Comparator</h1>
+        <button class="btn btn-outline-secondary" @onclick="ToggleTheme">
+            @if (_isDarkMode)
+            {
+                <span>☀️ Light</span>
+            }
+            else
+            {
+                <span>🌙 Dark</span>
+            }
+        </button>
+    </div>
+
+    @if (string.IsNullOrEmpty(_browserTimezone))
+    {
+        <div class="alert alert-info">
+            <div class="spinner-border spinner-border-sm me-2" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            Detecting your timezone...
+        </div>
+    }
+    else
+    {
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">🏠 Your Local Time</h5>
+                <p class="mb-1"><strong>Timezone:</strong> @_browserTimezone</p>
+                <p class="display-6 mb-0">@_localTime</p>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">🔍 Compare with other timezones</h5>
+                <div class="mb-3">
+                    <select class="form-select" @onchange="OnTimezoneSelected">
+                        <option value="">Select a timezone to compare...</option>
+                        @foreach (var tz in _allTimezones)
+                        {
+                            <option value="@tz">@tz</option>
+                        }
+                    </select>
+                </div>
+            </div>
+        </div>
+
+        @if (_comparedTimezones.Any())
+        {
+            <div class="row">
+                @foreach (var comparison in _comparedTimezones)
+                {
+                    <div class="col-md-6 mb-3">
+                        <div class="card">
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between align-items-start mb-2">
+                                    <h6 class="card-subtitle">@comparison.Timezone</h6>
+                                    <button class="btn btn-sm btn-outline-danger" @onclick="() => RemoveTimezone(comparison.Timezone)">
+                                        ✕
+                                    </button>
+                                </div>
+                                <p class="h4 mb-2">@comparison.Time</p>
+                                <p class="text-muted mb-0">
+                                    <small>@comparison.Offset</small>
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    }
+</div>
+
+@code {
+    private string _browserTimezone = string.Empty;
+    private string _localTime = string.Empty;
+    private List<string> _allTimezones = new();
+    private List<TimezoneComparison> _comparedTimezones = new();
+    private System.Threading.Timer? _timer;
+    private bool _isDarkMode = false;
+
+    protected override async Task OnInitializedAsync()
+    {
+        _browserTimezone = await TimezoneService.GetBrowserTimezoneAsync();
+        _allTimezones = TimezoneService.GetAllTimezones().ToList();
+        
+        // Load theme preference
+        try
+        {
+            var savedTheme = await JSRuntime.InvokeAsync<string>("getTheme");
+            _isDarkMode = savedTheme == "dark";
+            await JSRuntime.InvokeVoidAsync("setTheme", _isDarkMode ? "dark" : "light");
+        }
+        catch { }
+
+        // Start timer to update time every second
+        _timer = new System.Threading.Timer(async _ =>
+        {
+            UpdateTimes();
+            await InvokeAsync(StateHasChanged);
+        }, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
+    }
+
+    private void UpdateTimes()
+    {
+        var instant = SystemClock.Instance.GetCurrentInstant();
+        
+        // Update local time
+        if (!string.IsNullOrEmpty(_browserTimezone))
+        {
+            var localZone = DateTimeZoneProviders.Tzdb.GetZoneOrNull(_browserTimezone);
+            if (localZone != null)
+            {
+                var localZoned = instant.InZone(localZone);
+                _localTime = localZoned.ToString("HH:mm:ss", null);
+            }
+        }
+
+        // Update compared timezones
+        foreach (var comparison in _comparedTimezones)
+        {
+            var zone = DateTimeZoneProviders.Tzdb.GetZoneOrNull(comparison.Timezone);
+            if (zone != null)
+            {
+                var zoned = instant.InZone(zone);
+                comparison.Time = zoned.ToString("HH:mm:ss", null);
+                
+                // Calculate offset
+                var localZone = DateTimeZoneProviders.Tzdb.GetZoneOrNull(_browserTimezone);
+                if (localZone != null)
+                {
+                    var localOffset = localZone.GetUtcOffset(instant);
+                    var targetOffset = zone.GetUtcOffset(instant);
+                    var diff = targetOffset - localOffset;
+                    
+                    var hours = diff.Seconds / 3600;
+                    var minutes = Math.Abs((diff.Seconds % 3600) / 60);
+                    
+                    if (hours > 0)
+                        comparison.Offset = $"+{hours}h {minutes}m ahead";
+                    else if (hours < 0)
+                        comparison.Offset = $"{hours}h {minutes}m behind";
+                    else if (minutes > 0)
+                        comparison.Offset = $"+{minutes}m ahead";
+                    else if (minutes < 0)
+                        comparison.Offset = $"{minutes}m behind";
+                    else
+                        comparison.Offset = "Same time";
+                }
+            }
+        }
+    }
+
+    private void OnTimezoneSelected(ChangeEventArgs e)
+    {
+        var selectedTimezone = e.Value?.ToString();
+        if (!string.IsNullOrEmpty(selectedTimezone) && 
+            !_comparedTimezones.Any(c => c.Timezone == selectedTimezone) &&
+            selectedTimezone != _browserTimezone)
+        {
+            _comparedTimezones.Add(new TimezoneComparison 
+            { 
+                Timezone = selectedTimezone,
+                Time = "",
+                Offset = ""
+            });
+            UpdateTimes();
+        }
+    }
+
+    private void RemoveTimezone(string timezone)
+    {
+        _comparedTimezones.RemoveAll(c => c.Timezone == timezone);
+    }
+
+    private async Task ToggleTheme()
+    {
+        _isDarkMode = !_isDarkMode;
+        await JSRuntime.InvokeVoidAsync("setTheme", _isDarkMode ? "dark" : "light");
+    }
+
+    public void Dispose()
+    {
+        _timer?.Dispose();
+    }
+
+    private class TimezoneComparison
+    {
+        public string Timezone { get; set; } = string.Empty;
+        public string Time { get; set; } = string.Empty;
+        public string Offset { get; set; } = string.Empty;
+    }
+}
